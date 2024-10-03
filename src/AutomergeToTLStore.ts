@@ -1,17 +1,36 @@
 import { TLRecord, RecordId, TLStore } from "@tldraw/tldraw"
 import * as Automerge from "@automerge/automerge/next"
 
-export function applyAutomergePatchesToTLStore(
+/** Convert a value from an automerge doc to a value consumable by TLDraw.
+ *  The main thing we need to do is convert RawStrings to regular strings,
+ *  which can be achieved with a JSON.parse/stringify roundtrip.
+ */
+export function automergeValueToTldrawValue(value: any): any {
+  return JSON.parse(JSON.stringify(value))
+}
+
+export function translateAutomergePatchesToTLStoreUpdates(
   patches: Automerge.Patch[],
   store: TLStore
-) {
+): [TLRecord[], TLRecord["id"][]] {
   const toRemove: TLRecord["id"][] = []
   const updatedObjects: { [id: string]: TLRecord } = {}
 
-  patches.forEach((patch) => {
+  patches.forEach((rawPatch) => {
+    let patch = rawPatch
+    if (
+      rawPatch.action === "put" &&
+      rawPatch.value instanceof Automerge.RawString
+    ) {
+      patch = {
+        ...rawPatch,
+        value: rawPatch.value.toString(),
+      }
+    }
+
     if (!isStorePatch(patch)) return
 
-    const id = pathToId(patch.path)
+    const id = pathToId(patch.path as string[])
     const record =
       updatedObjects[id] || JSON.parse(JSON.stringify(store.get(id) || {}))
 
@@ -23,6 +42,7 @@ export function applyAutomergePatchesToTLStore(
       case "put":
         updatedObjects[id] = applyPutToObject(patch, record)
         break
+      //@ts-expect-error not sure why this is missing
       case "update": {
         updatedObjects[id] = applyUpdateToObject(patch, record)
         break
@@ -32,19 +52,28 @@ export function applyAutomergePatchesToTLStore(
         break
       }
       case "del": {
-        const id = pathToId(patch.path)
+        const id = pathToId(patch.path as string[])
         toRemove.push(id as TLRecord["id"])
         break
       }
       default: {
-        console.log("Unsupported patch:", patch)
+        console.error("Unsupported patch:", patch)
       }
     }
   })
   const toPut = Object.values(updatedObjects)
+  return [toPut, toRemove]
+}
 
-  // put / remove the records in the store
-  console.log({ patches, toPut })
+export function applyAutomergePatchesToTLStore(
+  patches: Automerge.Patch[],
+  store: TLStore
+) {
+  const [toPut, toRemove] = translateAutomergePatchesToTLStoreUpdates(
+    patches,
+    store
+  )
+
   store.mergeRemoteChanges(() => {
     if (toRemove.length) store.remove(toRemove)
     if (toPut.length) store.put(toPut)
@@ -61,6 +90,7 @@ const pathToId = (path: string[]): RecordId<any> => {
 }
 
 const applyInsertToObject = (patch: Automerge.Patch, object: any): TLRecord => {
+  //@ts-expect-error values does indeed exist on patch... not sure why the type is wrong
   const { path, values } = patch
   let current = object
   const insertionPoint = path[path.length - 1]
@@ -80,6 +110,7 @@ const applyInsertToObject = (patch: Automerge.Patch, object: any): TLRecord => {
 }
 
 const applyPutToObject = (patch: Automerge.Patch, object: any): TLRecord => {
+  //@ts-expect-error values does indeed exist on patch... not sure why the type is wrong
   const { path, value } = patch
   let current = object
   // special case
@@ -105,6 +136,7 @@ const applyPutToObject = (patch: Automerge.Patch, object: any): TLRecord => {
 }
 
 const applyUpdateToObject = (patch: Automerge.Patch, object: any): TLRecord => {
+  //@ts-expect-error values does indeed exist on patch... not sure why the type is wrong
   const { path, value } = patch
   let current = object
   const parts = path.slice(2, -1)
@@ -120,6 +152,7 @@ const applyUpdateToObject = (patch: Automerge.Patch, object: any): TLRecord => {
 }
 
 const applySpliceToObject = (patch: Automerge.Patch, object: any): TLRecord => {
+  //@ts-expect-error values does indeed exist on patch... not sure why the type is wrong
   const { path, value } = patch
   let current = object
   const insertionPoint = path[path.length - 1]

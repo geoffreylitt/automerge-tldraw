@@ -14,6 +14,8 @@ import {
   react,
   TLStoreSnapshot,
   sortById,
+  RecordId,
+  UnknownRecord,
 } from "@tldraw/tldraw"
 import { useEffect, useState } from "react"
 import { DocHandle, DocHandleChangePayload } from "@automerge/automerge-repo"
@@ -22,14 +24,20 @@ import {
   useRemoteAwareness,
 } from "@automerge/automerge-repo-react-hooks"
 
-import { applyAutomergePatchesToTLStore } from "./AutomergeToTLStore.js"
-import { applyTLStoreChangesToAutomerge } from "./TLStoreToAutomerge.js"
+import {
+  applyAutomergePatchesToTLStore,
+  automergeValueToTldrawValue,
+} from "./AutomergeToTLStore"
+import { applyTLStoreChangesToAutomerge } from "./TLStoreToAutomerge"
+import { TLDrawDoc } from "../../datatype"
 
 export function useAutomergeStore({
   handle,
+  doc,
   shapeUtils = [],
 }: {
   handle: DocHandle<TLStoreSnapshot>
+  doc?: TLDrawDoc // if doc is passed in handle is ignored
   userId: string
   shapeUtils?: TLAnyShapeUtilConstructor[]
 }): TLStoreWithStatus {
@@ -46,6 +54,7 @@ export function useAutomergeStore({
 
   /* -------------------- TLDraw <--> Automerge -------------------- */
   useEffect(() => {
+    if (!handle) return
     const unsubs: (() => void)[] = []
 
     // A hacky workaround to prevent local changes from being applied twice
@@ -84,15 +93,19 @@ export function useAutomergeStore({
 
     /* Defer rendering until the document is ready */
     // TODO: need to think through the various status possibilities here and how they map
-    handle.whenReady().then(() => {
-      const doc = handle.docSync()
+
+    // hack skip loading from handle if doc is passed directly
+    // for this tldraw should be in readonly mode otherwise this will break
+    Promise.resolve(
+      doc ?? handle.whenReady().then(() => handle.docSync())
+    ).then((doc) => {
       if (!doc) throw new Error("Document not found")
       if (!doc.store) throw new Error("Document store not initialized")
 
       store.mergeRemoteChanges(() => {
         store.loadSnapshot({
-          store: JSON.parse(JSON.stringify(doc.store)),
-          schema: doc.schema,
+          store: automergeValueToTldrawValue(doc.store),
+          schema: automergeValueToTldrawValue(doc.schema),
         })
       })
 
@@ -107,14 +120,20 @@ export function useAutomergeStore({
       unsubs.forEach((fn) => fn())
       unsubs.length = 0
     }
-  }, [handle, store])
+  }, [doc, handle, store])
 
   return storeWithStatus
 }
 
-export function useAutomergePresence({ handle, store, userMetadata }: 
-  { handle: DocHandle<TLStoreSnapshot>, store: TLStoreWithStatus, userMetadata: any }) {
-
+export function useAutomergePresence({
+  handle,
+  store,
+  userMetadata,
+}: {
+  handle: DocHandle<TLStoreSnapshot>
+  store: TLStoreWithStatus
+  userMetadata: any
+}) {
   const innerStore = store?.store
 
   const { userId, name, color } = userMetadata
@@ -132,23 +151,30 @@ export function useAutomergePresence({ handle, store, userMetadata }:
 
   /* ----------- Presence stuff ----------- */
   useEffect(() => {
-    if (!innerStore) return 
-    
-    const toPut: TLRecord[] = 
-      Object.values(peerStates)
-      .filter((record) => record && Object.keys(record).length !== 0)
+    if (!innerStore) return
+
+    const toPut: TLRecord[] = Object.values(peerStates).filter(
+      (record) => record && Object.keys(record).length !== 0
+    )
 
     // put / remove the records in the store
-    const toRemove = innerStore.query.records('instance_presence').get().sort(sortById)
-      .map((record) => record.id)
-      .filter((id) => !toPut.find((record) => record.id === id))
+    const toRemove = innerStore.query
+      .records("instance_presence")
+      // @ts-expect-error tldraw types need update
+      .get()
+      .sort(sortById)
+      .map((record: TLRecord) => record.id)
+      .filter(
+        (id: RecordId<UnknownRecord>) =>
+          !toPut.find((record) => record.id === id)
+      )
 
     if (toRemove.length) innerStore.remove(toRemove)
     if (toPut.length) innerStore.put(toPut)
   }, [innerStore, peerStates])
 
   useEffect(() => {
-    if (!innerStore) return 
+    if (!innerStore) return
     /* ----------- Presence stuff ----------- */
     setUserPreferences({ id: userId, color, name })
 
@@ -172,12 +198,12 @@ export function useAutomergePresence({ handle, store, userMetadata }:
     )(innerStore)
 
     return react("when presence changes", () => {
+      // @ts-expect-error tldraw types need update
       const presence = presenceDerivation.get()
       requestAnimationFrame(() => {
         updateLocalState(presence)
       })
     })
-  }, [innerStore, userId, updateLocalState])
+  }, [innerStore, userId, updateLocalState, color, name])
   /* ----------- End presence stuff ----------- */
-
 }
